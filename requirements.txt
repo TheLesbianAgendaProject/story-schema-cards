@@ -2,3 +2,5 @@ streamlit
 openai
 pandas
 requests
+reportlab
+pillow
