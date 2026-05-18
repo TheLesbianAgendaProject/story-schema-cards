@@ -4,3 +4,4 @@ pandas
 requests
 reportlab
 pillow
+supabase

@@ -1,3 +1,6 @@
+from openai.types import Image
+
+from supabase_client import supabase
 import base64
 import io
 import json
@@ -8,12 +11,10 @@ import pandas as pd
 import requests
 import streamlit as st
 from openai import OpenAI
-from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
-
+from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------
 # Page setup
@@ -27,11 +28,9 @@ st.set_page_config(
 
 st.title("📚 Story Schema Cards")
 st.caption(
-    "Generate printable story schema cards with images for public-domain, "
+    "Generate printable story schema cards for public-domain, "
     "open-source, or rights-cleared books."
 )
-
-
 # ---------------------------------------------------------
 # OpenAI client
 # ---------------------------------------------------------
@@ -55,7 +54,7 @@ def get_openai_client():
 
 
 # ---------------------------------------------------------
-# Prompt builder
+# Prompt builder for schema card text
 # ---------------------------------------------------------
 
 def build_prompt(
@@ -66,7 +65,8 @@ def build_prompt(
     deck_mode,
     spoiler_mode,
     card_focus,
-    notes
+    notes,
+    chapter_context
 ):
     return f"""
 You are an educational reading-support designer creating printable story schema cards.
@@ -81,6 +81,9 @@ Deck mode: {deck_mode}
 Spoiler mode: {spoiler_mode}
 Card focus: {card_focus}
 User notes: {notes if notes else "None"}
+
+Optional chapter/context text:
+{chapter_context[:4000] if chapter_context else "No chapter context provided."}
 
 Purpose:
 These cards support readers who can decode text but may struggle to visualize characters,
@@ -108,8 +111,6 @@ Use this exact structure:
       "description": "",
       "why_it_matters": "",
       "chapter_reference": "",
-      "image_prompt": "",
-      "safe_image_subject": "",
       "image_search_query": "",
       "generic_image_fallback": "",
       "priority": "essential | useful | optional | deep",
@@ -134,27 +135,9 @@ Rules:
 - If spoiler mode is low, avoid major ending spoilers.
 - Keep descriptions under 28 words.
 - Keep why_it_matters under 20 words.
-- image_prompt should describe a simple generic educational illustration.
-- safe_image_subject should be a very safe, neutral visual subject for image generation.
 - image_search_query should help the user find public-domain or open-license images.
 - generic_image_fallback should suggest a generic public-domain-friendly image if no book-specific image is available.
 - If unsure about a detail, keep the card general rather than inventing plot facts.
-
-Image prompt rules:
-- simple classroom-friendly illustration
-- no movie adaptation references
-- no modern copyrighted character likenesses
-- no named living artist styles
-- no publisher artwork imitation
-- no logos
-- no text inside the image
-- no violence
-- no weapons
-- no injury
-- no frightening imagery
-- clear single subject
-- white or simple background
-- suitable for a printable flashcard
 
 Deck mode guidance:
 - Sample: 8 essential cards
@@ -175,7 +158,7 @@ Create enough cards to support comprehension.
 
 
 # ---------------------------------------------------------
-# Generate schema deck
+# Generate schema deck text
 # ---------------------------------------------------------
 
 def generate_schema_deck(
@@ -186,7 +169,8 @@ def generate_schema_deck(
     deck_mode,
     spoiler_mode,
     card_focus,
-    notes
+    notes,
+    chapter_context
 ):
     client = get_openai_client()
 
@@ -198,7 +182,8 @@ def generate_schema_deck(
         deck_mode=deck_mode,
         spoiler_mode=spoiler_mode,
         card_focus=card_focus,
-        notes=notes
+        notes=notes,
+        chapter_context=chapter_context
     )
 
     response = client.responses.create(
@@ -266,7 +251,7 @@ def balance_cards(cards, deck_mode):
 
 
 # ---------------------------------------------------------
-# Safer image prompt builder
+# Safe image prompt generation
 # ---------------------------------------------------------
 
 def sanitize_text_for_image_prompt(text):
@@ -276,6 +261,17 @@ def sanitize_text_for_image_prompt(text):
     safe_text = str(text)
 
     replacements = {
+        "Alice": "storybook reader",
+        "girl": "storybook figure",
+        "child": "storybook figure",
+        "boy": "storybook figure",
+        "man": "storybook figure",
+        "woman": "storybook figure",
+        "rabbit wearing a waistcoat": "white rabbit beside a pocket watch",
+        "wearing a waistcoat": "beside a pocket watch",
+        "falls": "travels",
+        "falling": "traveling",
+        "down the rabbit hole": "near a round garden tunnel",
         "kill": "conflict",
         "killing": "conflict",
         "murder": "conflict",
@@ -297,7 +293,6 @@ def sanitize_text_for_image_prompt(text):
         "mad": "whimsical",
         "insane": "whimsical",
         "crazy": "whimsical",
-        "falling": "floating",
         "attack": "conflict",
         "attacks": "conflict",
         "punishment": "rule",
@@ -315,54 +310,186 @@ def sanitize_text_for_image_prompt(text):
     return safe_text
 
 
+def get_symbolic_subject(card):
+    label = str(card.get("label", "")).lower()
+    card_type = str(card.get("card_type", "")).lower()
+
+    # Alice in Wonderland-specific safe symbols.
+    if "white rabbit" in label:
+        return "a white rabbit beside a pocket watch on a plain white background"
+
+    if "rabbit hole" in label:
+        return "a round garden tunnel entrance under a tree on a plain white background"
+
+    if "alice" in label:
+        return "an open storybook with a small blue ribbon bookmark on a plain white background"
+
+    if "cheshire" in label or "cat" in label:
+        return "a friendly striped cat sitting on a tree branch on a plain white background"
+
+    if "queen" in label or "hearts" in label:
+        return "a red heart playing card, a small crown, and red roses on a plain white background"
+
+    if "tea" in label or "party" in label:
+        return "a tea cup, teapot, and small table setting on a plain white background"
+
+    if "bottle" in label or "drink" in label:
+        return "a small glass bottle on a simple table on a plain white background"
+
+    if "key" in label:
+        return "a small golden key on a plain white background"
+
+    if "door" in label:
+        return "a small wooden door with a round handle on a plain white background"
+
+    if "croquet" in label:
+        return "a garden lawn with simple croquet hoops on a plain white background"
+
+    if "caterpillar" in label:
+        return "a blue caterpillar on a green leaf on a plain white background"
+
+    if "cards" in label or "soldiers" in label:
+        return "playing cards arranged in a neat row on a plain white background"
+
+    if "duchess" in label:
+        return "a small crown and teacup on a plain white background"
+
+    if "mock turtle" in label:
+        return "a friendly turtle near a shoreline on a plain white background"
+
+    if "gryphon" in label:
+        return "a simple mythical bird-lion creature silhouette on a plain white background"
+
+    if "trial" in label:
+        return "a wooden table, paper scroll, and small gavel on a plain white background"
+
+    # Generic safe fallbacks by type.
+    if card_type == "character":
+        return "a simple symbolic object representing a story character on a plain white background"
+
+    if card_type == "setting":
+        return "a simple landscape symbol representing a story setting on a plain white background"
+
+    if card_type == "scene":
+        return "a simple arrangement of symbolic story objects on a plain white background"
+
+    if card_type == "object":
+        return "a single simple story object centered on a plain white background"
+
+    if card_type == "concept":
+        return "a simple educational icon representing an idea on a plain white background"
+
+    if card_type == "episode":
+        return "a simple map marker and open book icon on a plain white background"
+
+    if card_type == "group":
+        return "a small group of simple symbolic shapes on a plain white background"
+
+    return "a simple open book icon on a plain white background"
+
+
 def build_safe_image_prompt(card):
-    card_type = card.get("card_type", "schema")
-    label = card.get("label", "story element")
-
-    safe_subject = (
-        card.get("safe_image_subject")
-        or card.get("generic_image_fallback")
-        or card.get("image_search_query")
-        or card.get("image_prompt")
-        or label
-    )
-
-    safe_subject = sanitize_text_for_image_prompt(safe_subject)
-    safe_label = sanitize_text_for_image_prompt(label)
+    subject = get_symbolic_subject(card)
+    subject = sanitize_text_for_image_prompt(subject)
 
     return f"""
-Create a simple classroom-friendly illustration for a printable story schema flashcard.
+Create a simple printable educational flashcard image.
 
 Subject:
-{safe_subject}
+{subject}
 
-Card category:
-{card_type}
+Style:
+simple clean children's educational illustration, soft shapes, clear object, centered composition.
 
-Label concept:
-{safe_label}
-
-Visual requirements:
-- simple educational illustration
-- classic literature inspired
-- no text in the image
+Strict rules:
+- no text
 - no letters
+- no labels
 - no logos
+- no people
+- no realistic humans
+- no children
+- no injury
+- no danger
+- no falling
 - no violence
 - no weapons
-- no injury
 - no frightening imagery
-- no scary faces
-- no modern movie adaptation references
+- no movie adaptation references
 - no publisher artwork imitation
 - no named artist style
-- no realistic child likeness
-- no celebrity likeness
-- clear single subject
-- centered composition
-- white or simple background
-- suitable for elementary classroom printing
+- plain white background
 """
+
+
+def build_contextual_safe_image_prompt(card, chapter_context=""):
+    client = get_openai_client()
+
+    label = card.get("label", "")
+    card_type = card.get("card_type", "")
+    description = card.get("description", "")
+    why_it_matters = card.get("why_it_matters", "")
+    fallback = card.get("generic_image_fallback", "")
+    existing_safe_subject = card.get("safe_image_subject", "")
+
+    prompt = f"""
+You are creating a safe image-generation prompt for a printable educational literature flashcard.
+
+The final image will be used on a reading-support card for a public-domain book.
+
+Card:
+- Type: {card_type}
+- Label: {label}
+- Description: {description}
+- Why it matters: {why_it_matters}
+- Existing safe subject: {existing_safe_subject}
+- Generic fallback: {fallback}
+
+Relevant public-domain book context:
+{chapter_context[:2500] if chapter_context else "No context provided."}
+
+Task:
+Create ONE safe image prompt that visually represents the card's story schema concept.
+
+Important:
+The image prompt must be customized to the book context, but it must avoid unsafe or easily-blocked wording.
+
+Rules:
+- Do not include the words: falling, falls, fall, danger, dangerous, injury, injured, violence, weapon, blood, kill, death, dead, execution, beheading.
+- Do not depict a child in danger.
+- Avoid realistic humans.
+- Prefer symbolic objects, settings, props, silhouettes, landscapes, or visual metaphors.
+- No text, letters, labels, logos, or captions inside the image.
+- No movie adaptation references.
+- No publisher artwork imitation.
+- No named artist styles.
+- Keep it classroom-friendly.
+- Use a plain or simple background.
+- Make it suitable for a printable flashcard.
+
+Return JSON only:
+{{
+  "safe_image_prompt": ""
+}}
+"""
+
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt,
+        text={
+            "format": {
+                "type": "json_object"
+            }
+        }
+    )
+
+    data = json.loads(response.output_text)
+    safe_prompt = data.get("safe_image_prompt", "").strip()
+
+    if not safe_prompt:
+        safe_prompt = build_safe_image_prompt(card)
+
+    return safe_prompt
 
 
 # ---------------------------------------------------------
@@ -443,13 +570,19 @@ def create_placeholder_image(card):
 
 
 # ---------------------------------------------------------
-# Generate image for card with retry + fallback
+# Generate image for card with contextual retry + fallback
 # ---------------------------------------------------------
 
-def generate_card_image(card):
+def generate_card_image(card, chapter_context=""):
     client = get_openai_client()
 
-    safe_prompt = build_safe_image_prompt(card)
+    try:
+        safe_prompt = build_contextual_safe_image_prompt(
+            card=card,
+            chapter_context=chapter_context
+        )
+    except Exception:
+        safe_prompt = build_safe_image_prompt(card)
 
     try:
         result = client.images.generate(
@@ -465,29 +598,43 @@ def generate_card_image(card):
         return base64.b64decode(image_base64)
 
     except Exception as first_error:
-        label = sanitize_text_for_image_prompt(card.get("label", "story element"))
-        card_type = sanitize_text_for_image_prompt(card.get("card_type", "schema"))
+        label = str(card.get("label", "")).lower()
+        card_type = str(card.get("card_type", "")).lower()
+
+        # Super-safe custom fallbacks for common Alice Chapter 1 concepts.
+        if "white rabbit" in label:
+            fallback_subject = "a white rabbit beside a pocket watch, plain white background"
+        elif "rabbit hole" in label or "down the rabbit" in label:
+            fallback_subject = "a round garden tunnel entrance under a tree, plain white background"
+        elif "alice" in label:
+            fallback_subject = "an open storybook with a blue ribbon bookmark, plain white background"
+        elif "chapter" in label or "scene" in card_type:
+            fallback_subject = "a whimsical tunnel with floating books, jars, and maps, plain light background"
+        else:
+            fallback_subject = "an open book, bookmark, and small star, plain white background"
 
         fallback_prompt = f"""
-Create a simple neutral educational icon for a printable literature flashcard.
+Create a simple printable educational flashcard image.
 
 Subject:
-A symbolic, classroom-safe visual for a {card_type} card.
+{fallback_subject}
 
-Concept:
-{label}
+Style:
+simple clean children's educational illustration, centered composition, soft shapes.
 
-Visual requirements:
-- no people if avoidable
+Strict rules:
 - no text
 - no letters
+- no logos
+- no people
+- no realistic humans
+- no children
+- no danger
+- no falling
 - no violence
-- no scary imagery
-- no copyrighted character likeness
-- no movie references
-- simple centered object or place
-- white background
-- elementary classroom friendly
+- no weapons
+- no frightening imagery
+- plain white background
 """
 
         try:
@@ -513,7 +660,7 @@ Visual requirements:
 # Generate images for all cards
 # ---------------------------------------------------------
 
-def add_images_to_deck(deck, image_limit):
+def add_images_to_deck(deck, image_limit, chapter_context=""):
     cards = deck.get("cards", [])
 
     if not cards:
@@ -538,7 +685,10 @@ def add_images_to_deck(deck, image_limit):
         )
 
         try:
-            image_bytes = generate_card_image(card)
+            image_bytes = generate_card_image(
+                card=card,
+                chapter_context=chapter_context
+            )
             card["generated_image_bytes"] = image_bytes
             card["image_status"] = "generated"
 
@@ -559,8 +709,56 @@ def add_images_to_deck(deck, image_limit):
 def get_openverse_search_url(query):
     if not query:
         query = "public domain book illustration"
+
     encoded = requests.utils.quote(query)
     return f"https://openverse.org/search/image?q={encoded}"
+
+
+# ---------------------------------------------------------
+# Save generated deck to Supabase
+# ---------------------------------------------------------
+
+def save_deck_to_supabase(deck, user_email, reader_level, deck_mode, spoiler_mode):
+    book = deck.get("book", {})
+    cards = deck.get("cards", [])
+
+    book_result = supabase.table("books").insert({
+        "title": book.get("title", ""),
+        "author": book.get("author", ""),
+        "source_text": "",
+        "age_group": reader_level,
+        "reading_level": reader_level
+    }).execute()
+
+    book_id = book_result.data[0]["id"]
+
+    deck_result = supabase.table("decks").insert({
+        "book_id": book_id,
+        "deck_title": f"{book.get('title', 'Untitled')} Story Schema Deck",
+        "deck_type": deck_mode,
+        "status": "generated",
+        "canva_status": "not_started"
+    }).execute()
+
+    deck_id = deck_result.data[0]["id"]
+
+    card_rows = []
+
+    for index, card in enumerate(cards):
+        card_rows.append({
+            "deck_id": deck_id,
+            "card_order": index + 1,
+            "front_text": card.get("label", ""),
+            "back_text": card.get("description", ""),
+            "category": card.get("card_type", ""),
+            "difficulty": card.get("priority", ""),
+            "image_prompt": card.get("image_search_query", "")
+        })
+
+    if card_rows:
+        supabase.table("cards").insert(card_rows).execute()
+
+    return deck_id
 
 
 # ---------------------------------------------------------
@@ -591,8 +789,6 @@ def create_export_rows(deck, user_email, source_link, reader_level, deck_mode, s
             "description": card.get("description"),
             "why_it_matters": card.get("why_it_matters"),
             "chapter_reference": card.get("chapter_reference"),
-            "image_prompt": card.get("image_prompt"),
-            "safe_image_subject": card.get("safe_image_subject"),
             "image_search_query": image_query,
             "generic_image_fallback": card.get("generic_image_fallback"),
             "openverse_search_url": get_openverse_search_url(image_query),
@@ -602,10 +798,10 @@ def create_export_rows(deck, user_email, source_link, reader_level, deck_mode, s
             "sort_order": card.get("sort_order"),
             "image_source_url": "",
             "image_creator": "",
-            "image_license": "ai_generated_review_needed",
+            "image_license": "review_needed",
             "attribution_required": "",
             "attribution_text": "",
-            "license_verified": "needs_review",
+            "license_verified": "no",
             "canva_status": "not_started",
             "wix_shop_status": "not_started",
             "product_status": "raw_generation"
@@ -647,10 +843,20 @@ def create_printable_text(deck):
 
 
 # ---------------------------------------------------------
-# Text wrapping helper for PDF
+# PDF helpers
 # ---------------------------------------------------------
 
-def draw_wrapped_text(pdf, text, x, y, max_width, font_name, font_size, line_height, max_lines=None):
+def draw_wrapped_text(
+    pdf,
+    text,
+    x,
+    y,
+    max_width,
+    font_name,
+    font_size,
+    line_height,
+    max_lines=None
+):
     if not text:
         return y
 
@@ -693,8 +899,6 @@ def create_pdf(deck):
 
     page_width, page_height = letter
 
-    # 4 cards per page, 2x2 grid.
-    # These are "4x6-style" cards that fit letter paper.
     margin_x = 24
     margin_y = 24
     gap_x = 18
@@ -718,7 +922,6 @@ def create_pdf(deck):
         x = margin_x + col * (card_width + gap_x)
         y = page_height - margin_y - (row + 1) * card_height - row * gap_y
 
-        # Card border / cut line
         pdf.setStrokeColor(colors.black)
         pdf.setDash(4, 3)
         pdf.rect(x, y, card_width, card_height)
@@ -729,68 +932,17 @@ def create_pdf(deck):
         inner_y = y + card_height - padding
         inner_width = card_width - (2 * padding)
 
-        # Card type
-        pdf.setFont("Helvetica-Bold", 8)
         pdf.setFillColor(colors.black)
+
+        pdf.setFont("Helvetica-Bold", 8)
         pdf.drawString(inner_x, inner_y - 8, str(card.get("card_type", "")).upper())
 
-        # Label
         pdf.setFont("Helvetica-Bold", 15)
         label = str(card.get("label", ""))
         pdf.drawString(inner_x, inner_y - 30, label[:34])
 
-        # Image area
-        image_top = inner_y - 48
-        image_height = 145
-        image_width = inner_width
-        image_x = inner_x
-        image_y = image_top - image_height
+        text_y = inner_y - 58
 
-        pdf.setStrokeColor(colors.lightgrey)
-        pdf.rect(image_x, image_y, image_width, image_height)
-
-        image_bytes = card.get("generated_image_bytes")
-
-        if image_bytes:
-            try:
-                image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                image.thumbnail((int(image_width * 2), int(image_height * 2)))
-
-                image_buffer = io.BytesIO()
-                image.save(image_buffer, format="PNG")
-                image_buffer.seek(0)
-
-                image_reader = ImageReader(image_buffer)
-
-                pdf.drawImage(
-                    image_reader,
-                    image_x + 4,
-                    image_y + 4,
-                    width=image_width - 8,
-                    height=image_height - 8,
-                    preserveAspectRatio=True,
-                    anchor="c",
-                    mask="auto"
-                )
-            except Exception:
-                pdf.setFont("Helvetica", 9)
-                pdf.drawCentredString(
-                    image_x + image_width / 2,
-                    image_y + image_height / 2,
-                    "Image unavailable"
-                )
-        else:
-            pdf.setFont("Helvetica", 9)
-            pdf.drawCentredString(
-                image_x + image_width / 2,
-                image_y + image_height / 2,
-                "Image not generated"
-            )
-
-        # Description
-        text_y = image_y - 18
-
-        pdf.setFillColor(colors.black)
         text_y = draw_wrapped_text(
             pdf=pdf,
             text=card.get("description", ""),
@@ -798,16 +950,16 @@ def create_pdf(deck):
             y=text_y,
             max_width=inner_width,
             font_name="Helvetica",
-            font_size=9,
-            line_height=11,
-            max_lines=4
+            font_size=10,
+            line_height=13,
+            max_lines=6
         )
 
-        # Why it matters
-        text_y -= 4
+        text_y -= 8
+
         pdf.setFont("Helvetica-Bold", 8)
         pdf.drawString(inner_x, text_y, "Why it matters:")
-        text_y -= 10
+        text_y -= 12
 
         text_y = draw_wrapped_text(
             pdf=pdf,
@@ -816,19 +968,16 @@ def create_pdf(deck):
             y=text_y,
             max_width=inner_width,
             font_name="Helvetica",
-            font_size=8,
-            line_height=10,
-            max_lines=3
+            font_size=9,
+            line_height=11,
+            max_lines=5
         )
 
-        # Chapter/reference
         chapter = card.get("chapter_reference")
         if chapter:
             pdf.setFont("Helvetica-Oblique", 7)
-            pdf.setFillColor(colors.black)
-            pdf.drawString(inner_x, y + 10, str(chapter)[:60])
+            pdf.drawString(inner_x, y + 26, str(chapter)[:70])
 
-        # Book footer
         pdf.setFont("Helvetica", 6)
         pdf.setFillColor(colors.grey)
         footer = f"{book.get('title', '')} | Story Schema Cards"
@@ -841,17 +990,11 @@ def create_pdf(deck):
 
 
 # ---------------------------------------------------------
-# Make JSON safe for export
+# JSON safe helper
 # ---------------------------------------------------------
 
 def make_json_safe_deck(deck):
-    safe_deck = json.loads(json.dumps(deck, default=lambda value: None))
-
-    for card in safe_deck.get("cards", []):
-        if "generated_image_bytes" in card:
-            card["generated_image_bytes"] = "[removed from JSON export]"
-
-    return safe_deck
+    return json.loads(json.dumps(deck, default=lambda value: None))
 
 
 # ---------------------------------------------------------
@@ -931,19 +1074,14 @@ notes = st.sidebar.text_area(
     "Optional notes",
     placeholder="Example: Focus on confusing scenes, Victorian settings, or mythological figures."
 )
-
-generate_images = st.sidebar.checkbox(
-    "Generate AI images for cards",
-    value=True
-)
-
-image_limit = st.sidebar.number_input(
-    "Max real AI images to generate",
-    min_value=1,
-    max_value=40,
-    value=8,
-    step=1,
-    help="Cards beyond this limit get a placeholder image so the PDF still prints cleanly."
+chapter_context = st.sidebar.text_area(
+    "Optional chapter/context text",
+    placeholder=(
+        "Paste a short public-domain excerpt or summary here. "
+        "Example: Alice sees the White Rabbit, follows it across a field, "
+        "and enters a strange tunnel with shelves, jars, maps, and books."
+    ),
+    height=180
 )
 
 user_email = st.sidebar.text_input(
@@ -961,10 +1099,10 @@ generate_button = st.sidebar.button("Generate schema cards + PDF")
 with st.expander("What this tool does", expanded=True):
     st.write(
         """
-        This tool generates schema cards, optional AI images, and a printable PDF.
+        This tool generates story schema cards and a printable PDF.
         
-        The PDF is formatted as 4 flashcard-style cards per letter-size page.
-        If an image fails, the app uses a printable placeholder so the deck still exports.
+        It creates card content, image search ideas, Openverse search links,
+        a CSV export for Canva/Google Sheets, a JSON backup, and a printable text version.
         """
     )
 
@@ -978,8 +1116,6 @@ with st.expander("Important source and license note"):
         - attribution requirements
         - marketplace rules
         - privacy/payment/legal requirements
-        
-        AI-generated images should still be reviewed before commercial sale.
         """
     )
 
@@ -1013,7 +1149,8 @@ if generate_button:
                 deck_mode=deck_mode,
                 spoiler_mode=spoiler_mode,
                 card_focus=", ".join(card_focus),
-                notes=notes
+                notes=notes,
+                chapter_context=chapter_context
             )
 
             balanced_cards = balance_cards(
@@ -1035,15 +1172,18 @@ if generate_button:
             deck["book"]["deck_mode"] = deck_mode
             deck["book"]["spoiler_mode"] = spoiler_mode
 
-        if generate_images:
-            with st.spinner("Generating card images..."):
-                deck = add_images_to_deck(deck, image_limit=image_limit)
-        else:
-            for card in deck.get("cards", []):
-                card["generated_image_bytes"] = create_placeholder_image(card)
-                card["image_status"] = "placeholder_used_images_not_requested"
+        with st.spinner("Preparing downloads..."):
+            supabase_deck_id = save_deck_to_supabase(
+                deck=deck,
+                user_email=user_email,
+                reader_level=reader_level,
+                deck_mode=deck_mode,
+                spoiler_mode=spoiler_mode
+            )
 
-        with st.spinner("Building printable PDF..."):
+            deck["supabase_deck_id"] = supabase_deck_id
+        
+
             export_df = create_export_rows(
                 deck=deck,
                 user_email=user_email,
@@ -1060,6 +1200,7 @@ if generate_button:
         st.session_state["export_df"] = export_df
         st.session_state["printable_text"] = printable_text
         st.session_state["pdf_bytes"] = pdf_bytes
+        st.session_state["supabase_deck_id"] = supabase_deck_id
 
         st.success("Deck generated. PDF is ready to download.")
 
@@ -1150,18 +1291,13 @@ if "deck" in st.session_state:
             st.write(f"**Description:** {card.get('description')}")
             st.write(f"**Why it matters:** {card.get('why_it_matters')}")
             st.write(f"**Chapter/reference:** {card.get('chapter_reference')}")
-            st.write(f"**Image status:** {card.get('image_status')}")
+            st.write(f"**Image search query:** {card.get('image_search_query')}")
+            st.write(f"**Generic fallback:** {card.get('generic_image_fallback')}")
 
-            image_bytes = card.get("generated_image_bytes")
-
-            if image_bytes:
-                st.image(image_bytes, width=260)
-            else:
-                st.write(f"**Image prompt:** {card.get('image_prompt')}")
-                st.link_button(
-                    "Search open-license images",
-                    get_openverse_search_url(card.get("image_search_query", ""))
-                )
+            st.link_button(
+                "Search open-license images",
+                get_openverse_search_url(card.get("image_search_query", ""))
+            )
 
     st.subheader("Export Table")
     st.dataframe(export_df, use_container_width=True)
