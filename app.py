@@ -1,5 +1,3 @@
-from openai.types import Image
-
 from supabase_client import supabase
 import base64
 import io
@@ -1083,7 +1081,18 @@ chapter_context = st.sidebar.text_area(
     ),
     height=180
 )
+generate_images = st.sidebar.checkbox(
+    "Generate AI images for cards",
+    value=True
+)
 
+image_limit = st.sidebar.number_input(
+    "Maximum AI-generated cards (recommended: 4–20)",
+    min_value=1,
+    max_value=120,
+    value=4,
+    step=1
+)
 user_email = st.sidebar.text_input(
     "Tester email",
     placeholder="you@example.com"
@@ -1172,6 +1181,18 @@ if generate_button:
             deck["book"]["deck_mode"] = deck_mode
             deck["book"]["spoiler_mode"] = spoiler_mode
 
+        if generate_images:
+            with st.spinner("Generating card images..."):
+                deck = add_images_to_deck(
+                    deck,
+                    image_limit=image_limit,
+                    chapter_context=chapter_context
+                )
+        else:
+            for card in deck.get("cards", []):
+                card["generated_image_bytes"] = create_placeholder_image(card)
+                card["image_status"] = "placeholder_used_images_not_requested"
+
         with st.spinner("Preparing downloads..."):
             supabase_deck_id = save_deck_to_supabase(
                 deck=deck,
@@ -1182,7 +1203,6 @@ if generate_button:
             )
 
             deck["supabase_deck_id"] = supabase_deck_id
-        
 
             export_df = create_export_rows(
                 deck=deck,
@@ -1293,6 +1313,10 @@ if "deck" in st.session_state:
             st.write(f"**Chapter/reference:** {card.get('chapter_reference')}")
             st.write(f"**Image search query:** {card.get('image_search_query')}")
             st.write(f"**Generic fallback:** {card.get('generic_image_fallback')}")
+                        image_bytes = card.get("generated_image_bytes")
+
+            if image_bytes:
+                st.image(image_bytes, width=260)
 
             st.link_button(
                 "Search open-license images",
