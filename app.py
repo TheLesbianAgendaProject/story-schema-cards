@@ -1313,7 +1313,7 @@ if "deck" in st.session_state:
             st.write(f"**Chapter/reference:** {card.get('chapter_reference')}")
             st.write(f"**Image search query:** {card.get('image_search_query')}")
             st.write(f"**Generic fallback:** {card.get('generic_image_fallback')}")
-                        image_bytes = card.get("generated_image_bytes")
+            image_bytes = card.get("generated_image_bytes")
 
             if image_bytes:
                 st.image(image_bytes, width=260)
