@@ -1141,6 +1141,10 @@ deck_mode = st.sidebar.selectbox(
     ],
     index=0
 )
+access_code = st.sidebar.text_input(
+    "Paid access code",
+    placeholder="Required for Starter, Standard, Full Schema, or Deep Study"
+)
 
 spoiler_mode = st.sidebar.selectbox(
     "Spoiler mode",
@@ -1192,11 +1196,10 @@ image_limit = st.sidebar.number_input(
     step=1
 )
 user_email = st.sidebar.text_input(
-    "Tester email",
-    placeholder="you@example.com"
+    "Email address",
+    placeholder="you@example.com",
+    help="Required so you can receive or recover your generated deck."
 )
-
-generate_button = st.sidebar.button("Generate schema cards + PDF")
 
 
 # ---------------------------------------------------------
@@ -1240,11 +1243,31 @@ if generate_button:
         st.error("Please enter an author.")
         st.stop()
 
+     if not user_email.strip():
+        st.error("Please enter your email address.")
+        st.stop()
+
     if not public_domain_confirmed:
         st.error(
             "Please confirm that this is intended for a public-domain, open-source, or rights-cleared title."
         )
         st.stop()
+
+        paid_deck_modes = ["Starter", "Standard", "Full Schema", "Deep Study"]
+
+    valid_access_codes = [
+        "STARTER2026",
+        "STANDARD2026",
+        "FULL2026",
+        "DEEP2026"
+    ]
+
+    if deck_mode in paid_deck_modes and access_code.strip() not in valid_access_codes:
+        st.error("Longer deck modes require a paid access code. Sample decks are free.")
+        st.stop()
+
+     if deck_mode == "Sample" and image_limit > 8:
+        image_limit = 8
 
     try:
         with st.spinner("Generating schema card text..."):
