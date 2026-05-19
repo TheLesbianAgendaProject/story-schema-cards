@@ -1201,6 +1201,8 @@ user_email = st.sidebar.text_input(
     help="Required so you can receive or recover your generated deck."
 )
 
+generate_button = st.sidebar.button("Generate deck")
+
 
 # ---------------------------------------------------------
 # Main instructions
@@ -1243,7 +1245,7 @@ if generate_button:
         st.error("Please enter an author.")
         st.stop()
 
-     if not user_email.strip():
+    if not user_email.strip():
         st.error("Please enter your email address.")
         st.stop()
 
@@ -1253,7 +1255,7 @@ if generate_button:
         )
         st.stop()
 
-        paid_deck_modes = ["Starter", "Standard", "Full Schema", "Deep Study"]
+    paid_deck_modes = ["Starter", "Standard", "Full Schema", "Deep Study"]
 
     valid_access_codes = [
         "STARTER2026",
@@ -1266,7 +1268,7 @@ if generate_button:
         st.error("Longer deck modes require a paid access code. Sample decks are free.")
         st.stop()
 
-     if deck_mode == "Sample" and image_limit > 8:
+    if deck_mode == "Sample" and image_limit > 8:
         image_limit = 8
 
     try:
