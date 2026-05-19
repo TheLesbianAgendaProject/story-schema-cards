@@ -807,6 +807,53 @@ def save_card_images_to_supabase(deck_id, deck):
 
     return deck
 
+def upload_generated_file_to_supabase(bucket_name, file_path, file_bytes, content_type):
+    supabase.storage.from_(bucket_name).upload(
+        path=file_path,
+        file=file_bytes,
+        file_options={
+            "content-type": content_type,
+            "upsert": "true"
+        }
+    )
+
+    public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
+
+    return file_path, public_url
+
+
+def save_deck_files_to_supabase(deck_id, pdf_bytes, csv_bytes):
+    pdf_path = f"{deck_id}/schema-cards.pdf"
+    csv_path = f"{deck_id}/schema-cards.csv"
+
+    pdf_storage_path, pdf_public_url = upload_generated_file_to_supabase(
+        bucket_name="deck-pdfs",
+        file_path=pdf_path,
+        file_bytes=pdf_bytes,
+        content_type="application/pdf"
+    )
+
+    csv_storage_path, csv_public_url = upload_generated_file_to_supabase(
+        bucket_name="deck-csvs",
+        file_path=csv_path,
+        file_bytes=csv_bytes,
+        content_type="text/csv"
+    )
+
+    supabase.table("decks").update({
+        "pdf_storage_path": pdf_storage_path,
+        "pdf_public_url": pdf_public_url,
+        "csv_storage_path": csv_storage_path,
+        "csv_public_url": csv_public_url
+    }).eq("id", deck_id).execute()
+
+    return {
+        "pdf_storage_path": pdf_storage_path,
+        "pdf_public_url": pdf_public_url,
+        "csv_storage_path": csv_storage_path,
+        "csv_public_url": csv_public_url
+    }
+
 
 # ---------------------------------------------------------
 # Export table
@@ -1272,6 +1319,17 @@ if generate_button:
             printable_text = create_printable_text(deck)
             pdf_bytes = create_pdf(deck)
 
+            csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+
+            deck_file_urls = save_deck_files_to_supabase(
+                deck_id=supabase_deck_id,
+                pdf_bytes=pdf_bytes,
+                csv_bytes=csv_bytes
+            )
+
+            deck["pdf_public_url"] = deck_file_urls["pdf_public_url"]
+            deck["csv_public_url"] = deck_file_urls["csv_public_url"]
+
         st.session_state["deck"] = deck
         st.session_state["export_df"] = export_df
         st.session_state["printable_text"] = printable_text
@@ -1322,6 +1380,12 @@ if "deck" in st.session_state:
     )
 
     st.subheader("Download Files")
+
+    if deck.get("pdf_public_url"):
+        st.write(f"**Saved PDF URL:** {deck.get('pdf_public_url')}")
+
+    if deck.get("csv_public_url"):
+        st.write(f"**Saved CSV URL:** {deck.get('csv_public_url')}")
 
     st.download_button(
         label="Download Print-Ready PDF",
