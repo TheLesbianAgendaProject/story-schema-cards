@@ -11,6 +11,7 @@ import streamlit as st
 from openai import OpenAI
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from PIL import Image, ImageDraw, ImageFont
 
@@ -1037,8 +1038,51 @@ def create_pdf(deck):
         label = str(card.get("label", ""))
         pdf.drawString(inner_x, inner_y - 30, label[:34])
 
-        text_y = inner_y - 58
+                # Image area
+        image_top = inner_y - 48
+        image_height = 145
+        image_width = inner_width
+        image_x = inner_x
+        image_y = image_top - image_height
 
+        pdf.setStrokeColor(colors.lightgrey)
+        pdf.rect(image_x, image_y, image_width, image_height)
+
+        image_bytes = card.get("generated_image_bytes")
+
+        if image_bytes:
+            try:
+                image_reader = ImageReader(io.BytesIO(image_bytes))
+
+                pdf.drawImage(
+                    image_reader,
+                    image_x + 4,
+                    image_y + 4,
+                    width=image_width - 8,
+                    height=image_height - 8,
+                    preserveAspectRatio=True,
+                    anchor="c",
+                    mask="auto"
+                )
+            except Exception:
+                pdf.setFont("Helvetica", 9)
+                pdf.drawCentredString(
+                    image_x + image_width / 2,
+                    image_y + image_height / 2,
+                    "Image unavailable"
+                )
+        else:
+            pdf.setFont("Helvetica", 9)
+            pdf.drawCentredString(
+                image_x + image_width / 2,
+                image_y + image_height / 2,
+                "Image not generated"
+            )
+
+        # Description
+        text_y = image_y - 18
+
+        pdf.setFillColor(colors.black)
         text_y = draw_wrapped_text(
             pdf=pdf,
             text=card.get("description", ""),
@@ -1046,16 +1090,16 @@ def create_pdf(deck):
             y=text_y,
             max_width=inner_width,
             font_name="Helvetica",
-            font_size=10,
-            line_height=13,
-            max_lines=6
+            font_size=9,
+            line_height=11,
+            max_lines=4
         )
 
-        text_y -= 8
+        text_y -= 4
 
         pdf.setFont("Helvetica-Bold", 8)
         pdf.drawString(inner_x, text_y, "Why it matters:")
-        text_y -= 12
+        text_y -= 10
 
         text_y = draw_wrapped_text(
             pdf=pdf,
@@ -1064,11 +1108,10 @@ def create_pdf(deck):
             y=text_y,
             max_width=inner_width,
             font_name="Helvetica",
-            font_size=9,
-            line_height=11,
-            max_lines=5
+            font_size=8,
+            line_height=10,
+            max_lines=3
         )
-
         chapter = card.get("chapter_reference")
         if chapter:
             pdf.setFont("Helvetica-Oblique", 7)
