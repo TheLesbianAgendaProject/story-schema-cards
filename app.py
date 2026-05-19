@@ -750,13 +750,62 @@ def save_deck_to_supabase(deck, user_email, reader_level, deck_mode, spoiler_mod
             "back_text": card.get("description", ""),
             "category": card.get("card_type", ""),
             "difficulty": card.get("priority", ""),
-            "image_prompt": card.get("image_search_query", "")
+            "image_prompt": card.get("image_search_query", ""),
+            "image_status": card.get("image_status", "not_generated")
         })
 
-    if card_rows:
-        supabase.table("cards").insert(card_rows).execute()
+    card_result = supabase.table("cards").insert(card_rows).execute()
+
+    for index, saved_card in enumerate(card_result.data):
+        cards[index]["supabase_card_id"] = saved_card["id"]
 
     return deck_id
+def upload_card_image_to_supabase(deck_id, card_index, image_bytes):
+    if not image_bytes:
+        return None, None
+
+    file_path = f"{deck_id}/card-{card_index + 1:03}.png"
+
+    supabase.storage.from_("card-images").upload(
+        path=file_path,
+        file=image_bytes,
+        file_options={
+            "content-type": "image/png",
+            "upsert": "true"
+        }
+    )
+
+    public_url = supabase.storage.from_("card-images").get_public_url(file_path)
+
+    return file_path, public_url
+
+
+def save_card_images_to_supabase(deck_id, deck):
+    cards = deck.get("cards", [])
+
+    for index, card in enumerate(cards):
+        image_bytes = card.get("generated_image_bytes")
+        card_id = card.get("supabase_card_id")
+
+        if not image_bytes or not card_id:
+            continue
+
+        image_path, image_url = upload_card_image_to_supabase(
+            deck_id=deck_id,
+            card_index=index,
+            image_bytes=image_bytes
+        )
+
+        card["image_storage_path"] = image_path
+        card["image_public_url"] = image_url
+
+        supabase.table("cards").update({
+            "image_storage_path": image_path,
+            "image_public_url": image_url,
+            "image_status": card.get("image_status", "generated")
+        }).eq("id", card_id).execute()
+
+    return deck
 
 
 # ---------------------------------------------------------
@@ -790,7 +839,9 @@ def create_export_rows(deck, user_email, source_link, reader_level, deck_mode, s
             "image_search_query": image_query,
             "generic_image_fallback": card.get("generic_image_fallback"),
             "openverse_search_url": get_openverse_search_url(image_query),
-            "generated_image_status": card.get("image_status", "not_generated"),
+"image_public_url": card.get("image_public_url", ""),
+"image_storage_path": card.get("image_storage_path", ""),
+"generated_image_status": card.get("image_status", "not_generated"),
             "priority": card.get("priority"),
             "spoiler_level": card.get("spoiler_level"),
             "sort_order": card.get("sort_order"),
@@ -1203,6 +1254,11 @@ if generate_button:
             )
 
             deck["supabase_deck_id"] = supabase_deck_id
+
+            deck = save_card_images_to_supabase(
+                deck_id=supabase_deck_id,
+                deck=deck
+            )
 
             export_df = create_export_rows(
                 deck=deck,
