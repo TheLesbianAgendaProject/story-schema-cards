@@ -1174,7 +1174,7 @@ reader_level = st.sidebar.selectbox(
 )
 
 deck_mode = st.sidebar.selectbox(
-    "Deck mode",
+    "Deck mode - Sample is free",
     [
         "Sample",
         "Starter",
@@ -1187,6 +1187,13 @@ deck_mode = st.sidebar.selectbox(
 access_code = st.sidebar.text_input(
     "Paid access code",
     placeholder="Required for Starter, Standard, Full Schema, or Deep Study"
+)
+
+st.sidebar.markdown(
+    """
+    **Need a paid access code?**  
+    Buy one from the Story Schema Cards shop page, then paste it here.
+    """
 )
 
 spoiler_mode = st.sidebar.selectbox(
@@ -1250,6 +1257,9 @@ generate_button = st.sidebar.button("Generate deck")
 # ---------------------------------------------------------
 # Main instructions
 # ---------------------------------------------------------
+st.info(
+    "Sample decks are free. Longer decks require a paid access code from the shop."
+)
 
 with st.expander("What this tool does", expanded=True):
     st.write(
