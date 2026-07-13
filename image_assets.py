@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+import unicodedata
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
@@ -19,11 +20,35 @@ MAX_IMAGE_EDGE = 1200
 REQUEST_TIMEOUT = (5, 30)
 
 
+MATCH_STOP_WORDS = {
+    "and",
+    "the",
+    "for",
+    "from",
+    "into",
+    "with",
+    "that",
+    "this",
+    "story",
+    "image",
+    "card",
+}
+
+
+def normalize_match_text(value: Any) -> str:
+    """Normalize punctuation, accents, and possessives for stable deck-to-deck matching."""
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(character for character in text if not unicodedata.combining(character))
+    text = text.lower().replace("’", "'")
+    text = re.sub(r"\b([a-z0-9]+)'s\b", r"\1", text)
+    return " ".join(re.findall(r"[a-z0-9]+", text))
+
+
 def _terms(value: Any) -> set[str]:
     return {
         token
-        for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
-        if len(token) > 2
+        for token in normalize_match_text(value).split()
+        if len(token) > 2 and token not in MATCH_STOP_WORDS
     }
 
 
@@ -56,11 +81,11 @@ def similarity_score(query: Any, candidate: Any) -> float:
 def choose_existing_asset(
     card: dict[str, Any],
     candidates: Iterable[dict[str, Any]],
-    threshold: float = 0.72,
+    threshold: float = 0.46,
 ) -> dict[str, Any] | None:
-    """Choose only a high-confidence stored image match."""
-    query = card_search_text(card)
+    """Choose a book-scoped stored image using stable labels plus descriptive context."""
     card_type = str(card.get("card_type", "")).lower()
+    card_label = normalize_match_text(card.get("label"))
     best: dict[str, Any] | None = None
     best_score = 0.0
 
@@ -68,16 +93,45 @@ def choose_existing_asset(
         if not candidate.get("image_storage_path"):
             continue
         status = str(candidate.get("image_status", ""))
-        if "placeholder" in status:
+        if "placeholder" in status or status == "not_generated":
             continue
 
-        candidate_text = " ".join(
-            str(candidate.get(field, ""))
-            for field in ("front_text", "category", "image_prompt")
-        )
-        score = similarity_score(query, candidate_text)
-        if card_type and card_type == str(candidate.get("category", "")).lower():
-            score += 0.08
+        candidate_type = str(candidate.get("category", "")).lower()
+        if card_type and candidate_type and card_type != candidate_type:
+            continue
+
+        candidate_label = normalize_match_text(candidate.get("front_text"))
+        exact_label = bool(card_label and card_label == candidate_label)
+        if exact_label:
+            score = 1.0
+        else:
+            label_score = similarity_score(card.get("label"), candidate.get("front_text"))
+            prompt_score = similarity_score(
+                card.get("image_search_query") or card.get("generic_image_fallback"),
+                candidate.get("image_prompt"),
+            )
+            description_score = similarity_score(
+                card.get("description"), candidate.get("back_text")
+            )
+            full_context_score = similarity_score(
+                card_search_text(card),
+                " ".join(
+                    str(candidate.get(field, ""))
+                    for field in ("front_text", "back_text", "image_prompt")
+                ),
+            )
+            score = max(
+                (label_score * 0.58)
+                + (prompt_score * 0.24)
+                + (description_score * 0.10)
+                + (full_context_score * 0.08),
+                (prompt_score * 0.52)
+                + (label_score * 0.30)
+                + (description_score * 0.10)
+                + (full_context_score * 0.08),
+            )
+            if card_type and card_type == candidate_type:
+                score += 0.08
 
         if score > best_score:
             best_score = score
