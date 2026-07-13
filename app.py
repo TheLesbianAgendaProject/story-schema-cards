@@ -21,6 +21,7 @@ from image_assets import (
     download_image,
     image_digest,
     normalize_image,
+    normalize_match_text,
     search_openverse,
 )
 
@@ -668,21 +669,69 @@ Strict rules:
 # Resolve and immediately store images for all cards
 # ---------------------------------------------------------
 
-def load_existing_image_candidates(limit=1000):
-    try:
-        result = (
-            supabase.table("cards")
-            .select(
-                "front_text,category,image_prompt,image_storage_path,"
-                "image_public_url,image_status"
-            )
-            .not_.is_("image_storage_path", "null")
-            .limit(limit)
-            .execute()
-        )
-        return result.data or []
-    except Exception:
+def load_existing_image_candidates(book, limit=5000):
+    """Load reusable cards only from earlier decks for the same book."""
+    title_key = normalize_match_text(book.get("title"))
+    author_key = normalize_match_text(book.get("author"))
+    if not title_key:
         return []
+
+    book_result = (
+        supabase.table("books")
+        .select("id,title,author")
+        .limit(2000)
+        .execute()
+    )
+    matching_book_ids = [
+        row["id"]
+        for row in (book_result.data or [])
+        if normalize_match_text(row.get("title")) == title_key
+        and (
+            not author_key
+            or not normalize_match_text(row.get("author"))
+            or normalize_match_text(row.get("author")) == author_key
+        )
+    ]
+    if not matching_book_ids:
+        return []
+
+    deck_result = (
+        supabase.table("decks")
+        .select("id,book_id,created_at")
+        .in_("book_id", matching_book_ids)
+        .order("created_at", desc=True)
+        .limit(2000)
+        .execute()
+    )
+    matching_deck_ids = [row["id"] for row in (deck_result.data or [])]
+    if not matching_deck_ids:
+        return []
+
+    card_result = (
+        supabase.table("cards")
+        .select(
+            "deck_id,front_text,back_text,category,image_prompt,image_storage_path,"
+            "image_public_url,image_status,created_at"
+        )
+        .in_("deck_id", matching_deck_ids)
+        .not_.is_("image_storage_path", "null")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return card_result.data or []
+
+
+def reusable_candidate_from_card(card):
+    return {
+        "front_text": card.get("label", ""),
+        "back_text": card.get("description", ""),
+        "category": card.get("card_type", ""),
+        "image_prompt": card.get("image_search_query", ""),
+        "image_storage_path": card.get("image_storage_path"),
+        "image_public_url": card.get("image_public_url", ""),
+        "image_status": card.get("image_status", ""),
+    }
 
 
 def load_card_image_bytes(card):
@@ -746,7 +795,14 @@ def add_images_to_deck(
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    existing_candidates = load_existing_image_candidates()
+    try:
+        existing_candidates = load_existing_image_candidates(deck.get("book", {}))
+    except Exception as error:
+        existing_candidates = []
+        st.warning(
+            "The saved-image library could not be loaded, so this deck will use "
+            f"Openverse and new images instead. Details: {str(error)[:180]}"
+        )
     generated_count = 0
 
     for index, card in enumerate(cards):
@@ -771,6 +827,7 @@ def add_images_to_deck(
                     persist_card_image(
                         deck_id, index, card, image_bytes, "reused_existing_image", metadata
                     )
+                    existing_candidates.insert(0, reusable_candidate_from_card(card))
                     progress_bar.progress(progress)
                     continue
                 except Exception:
@@ -797,6 +854,7 @@ def add_images_to_deck(
                     persist_card_image(
                         deck_id, index, card, image_bytes, "openverse_selected", metadata
                     )
+                    existing_candidates.insert(0, reusable_candidate_from_card(card))
                     progress_bar.progress(progress)
                     continue
                 except Exception:
@@ -817,6 +875,7 @@ def add_images_to_deck(
                     "license_verified": "review_needed",
                 }
                 persist_card_image(deck_id, index, card, image_bytes, "generated", metadata)
+                existing_candidates.insert(0, reusable_candidate_from_card(card))
                 progress_bar.progress(progress)
                 continue
 
@@ -1527,14 +1586,11 @@ if generate_button:
 
             csv_bytes = export_df.to_csv(index=False).encode("utf-8")
 
-            deck_file_urls = save_deck_files_to_supabase(
+            save_deck_files_to_supabase(
                 deck_id=supabase_deck_id,
                 pdf_bytes=pdf_bytes,
                 csv_bytes=csv_bytes
             )
-
-            deck["pdf_public_url"] = deck_file_urls["pdf_public_url"]
-            deck["csv_public_url"] = deck_file_urls["csv_public_url"]
 
         st.session_state["deck"] = deck
         st.session_state["export_df"] = export_df
@@ -1594,12 +1650,6 @@ if "deck" in st.session_state:
 
     st.subheader("Download Files")
 
-    if deck.get("pdf_public_url"):
-        st.write(f"**Saved PDF URL:** {deck.get('pdf_public_url')}")
-
-    if deck.get("csv_public_url"):
-        st.write(f"**Saved CSV URL:** {deck.get('csv_public_url')}")
-
     st.download_button(
         label="Download Print-Ready PDF",
         data=pdf_bytes,
@@ -1617,6 +1667,8 @@ if "deck" in st.session_state:
     )
 
     json_safe_deck = make_json_safe_deck(deck)
+    json_safe_deck.pop("pdf_public_url", None)
+    json_safe_deck.pop("csv_public_url", None)
     json_data = json.dumps(json_safe_deck, indent=2).encode("utf-8")
 
     st.download_button(
@@ -1729,13 +1781,11 @@ if "deck" in st.session_state:
                         refreshed_export = create_export_rows(deck=deck, **generation_inputs)
                         refreshed_pdf = create_pdf(deck)
                         refreshed_csv = refreshed_export.to_csv(index=False).encode("utf-8")
-                        deck_file_urls = save_deck_files_to_supabase(
+                        save_deck_files_to_supabase(
                             deck_id=deck.get("supabase_deck_id"),
                             pdf_bytes=refreshed_pdf,
                             csv_bytes=refreshed_csv,
                         )
-                        deck["pdf_public_url"] = deck_file_urls["pdf_public_url"]
-                        deck["csv_public_url"] = deck_file_urls["csv_public_url"]
                         st.session_state["deck"] = deck
                         st.session_state["export_df"] = refreshed_export
                         st.session_state["pdf_bytes"] = refreshed_pdf
