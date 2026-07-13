@@ -15,6 +15,15 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from PIL import Image, ImageDraw, ImageFont
 
+from image_assets import (
+    choose_existing_asset,
+    crop_image,
+    download_image,
+    image_digest,
+    normalize_image,
+    search_openverse,
+)
+
 # ---------------------------------------------------------
 # Page setup
 # ---------------------------------------------------------
@@ -656,10 +665,79 @@ Strict rules:
 
 
 # ---------------------------------------------------------
-# Generate images for all cards
+# Resolve and immediately store images for all cards
 # ---------------------------------------------------------
 
-def add_images_to_deck(deck, image_limit, chapter_context=""):
+def load_existing_image_candidates(limit=1000):
+    try:
+        result = (
+            supabase.table("cards")
+            .select(
+                "front_text,category,image_prompt,image_storage_path,"
+                "image_public_url,image_status"
+            )
+            .not_.is_("image_storage_path", "null")
+            .limit(limit)
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        return []
+
+
+def load_card_image_bytes(card):
+    image_path = card.get("image_storage_path")
+    if image_path:
+        try:
+            return supabase.storage.from_("card-images").download(image_path)
+        except Exception:
+            pass
+
+    image_url = card.get("image_public_url")
+    if image_url:
+        try:
+            return download_image(image_url)
+        except Exception:
+            pass
+
+    return None
+
+
+def persist_card_image(deck_id, card_index, card, image_bytes, status, metadata=None):
+    normalized = normalize_image(image_bytes)
+    image_path, image_url = upload_card_image_to_supabase(
+        deck_id=deck_id,
+        card_index=card_index,
+        image_bytes=normalized
+    )
+
+    metadata = metadata or {}
+    card.update(metadata)
+    card["image_storage_path"] = image_path
+    card["image_public_url"] = image_url
+    card["image_status"] = status
+    card["image_sha256"] = image_digest(normalized)
+    card.pop("generated_image_bytes", None)
+
+    card_id = card.get("supabase_card_id")
+    if card_id:
+        supabase.table("cards").update({
+            "image_storage_path": image_path,
+            "image_public_url": image_url,
+            "image_status": status
+        }).eq("id", card_id).execute()
+
+    return card
+
+
+def add_images_to_deck(
+    deck,
+    deck_id,
+    image_limit,
+    chapter_context="",
+    allow_generation=True,
+    use_openverse=True,
+):
     cards = deck.get("cards", [])
 
     if not cards:
@@ -668,36 +746,111 @@ def add_images_to_deck(deck, image_limit, chapter_context=""):
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    cards_to_generate = min(len(cards), image_limit)
+    existing_candidates = load_existing_image_candidates()
+    generated_count = 0
 
     for index, card in enumerate(cards):
         progress = int((index + 1) / max(len(cards), 1) * 100)
-
-        if index >= image_limit:
-            card["generated_image_bytes"] = create_placeholder_image(card)
-            card["image_status"] = "placeholder_used_due_to_image_limit"
-            progress_bar.progress(progress)
-            continue
-
-        status_text.write(
-            f"Generating image {index + 1} of {cards_to_generate}: {card.get('label')}"
-        )
+        status_text.write(f"Resolving image {index + 1} of {len(cards)}: {card.get('label')}")
 
         try:
-            image_bytes = generate_card_image(
-                card=card,
-                chapter_context=chapter_context
+            existing = choose_existing_asset(card, existing_candidates)
+            if existing:
+                try:
+                    image_bytes = supabase.storage.from_("card-images").download(
+                        existing["image_storage_path"]
+                    )
+                    metadata = {
+                        "image_source": "existing_database",
+                        "image_source_url": existing.get("image_public_url", ""),
+                        "image_license": "internal_reuse_review_needed",
+                        "attribution_text": "",
+                        "license_verified": "no",
+                        "image_match_score": existing.get("match_score"),
+                    }
+                    persist_card_image(
+                        deck_id, index, card, image_bytes, "reused_existing_image", metadata
+                    )
+                    progress_bar.progress(progress)
+                    continue
+                except Exception:
+                    pass
+
+            try:
+                openverse_asset = search_openverse(card) if use_openverse else None
+            except Exception:
+                openverse_asset = None
+
+            if openverse_asset:
+                try:
+                    image_bytes = download_image(openverse_asset["download_url"])
+                    metadata = {
+                        "image_source": "openverse",
+                        "image_source_url": openverse_asset.get("source_url", ""),
+                        "image_creator": openverse_asset.get("creator", ""),
+                        "image_license": openverse_asset.get("license", ""),
+                        "image_license_url": openverse_asset.get("license_url", ""),
+                        "attribution_text": openverse_asset.get("attribution", ""),
+                        "license_verified": "verify_before_commercial_use",
+                        "image_match_score": openverse_asset.get("match_score"),
+                    }
+                    persist_card_image(
+                        deck_id, index, card, image_bytes, "openverse_selected", metadata
+                    )
+                    progress_bar.progress(progress)
+                    continue
+                except Exception:
+                    pass
+
+            if allow_generation and generated_count < image_limit:
+                image_bytes = generate_card_image(
+                    card=card,
+                    chapter_context=chapter_context
+                )
+                generated_count += 1
+                metadata = {
+                    "image_source": "openai_generated",
+                    "image_source_url": "",
+                    "image_creator": "OpenAI",
+                    "image_license": "generated_asset_review_needed",
+                    "attribution_text": "",
+                    "license_verified": "review_needed",
+                }
+                persist_card_image(deck_id, index, card, image_bytes, "generated", metadata)
+                progress_bar.progress(progress)
+                continue
+
+            image_bytes = create_placeholder_image(card)
+            persist_card_image(
+                deck_id,
+                index,
+                card,
+                image_bytes,
+                "placeholder_used_no_suitable_image",
+                {"image_source": "placeholder", "license_verified": "not_applicable"},
             )
-            card["generated_image_bytes"] = image_bytes
-            card["image_status"] = "generated"
 
         except Exception as e:
-            card["generated_image_bytes"] = create_placeholder_image(card)
-            card["image_status"] = f"placeholder_used_after_generation_failure: {e}"
+            image_bytes = create_placeholder_image(card)
+            persist_card_image(
+                deck_id,
+                index,
+                card,
+                image_bytes,
+                "placeholder_used_after_image_failure",
+                {
+                    "image_source": "placeholder",
+                    "image_error": str(e)[:300],
+                    "license_verified": "not_applicable",
+                },
+            )
 
         progress_bar.progress(progress)
 
-    status_text.write("Image generation complete.")
+    status_text.write(
+        f"Image resolution complete. Generated {generated_count} new image(s); "
+        "the rest were reused, retrieved, or replaced with placeholders."
+    )
     return deck
 
 
@@ -765,13 +918,13 @@ def upload_card_image_to_supabase(deck_id, card_index, image_bytes):
     if not image_bytes:
         return None, None
 
-    file_path = f"{deck_id}/card-{card_index + 1:03}.png"
+    file_path = f"{deck_id}/card-{card_index + 1:03}.jpg"
 
     supabase.storage.from_("card-images").upload(
         path=file_path,
         file=image_bytes,
         file_options={
-            "content-type": "image/png",
+            "content-type": "image/jpeg",
             "upsert": "true"
         }
     )
@@ -780,33 +933,6 @@ def upload_card_image_to_supabase(deck_id, card_index, image_bytes):
 
     return file_path, public_url
 
-
-def save_card_images_to_supabase(deck_id, deck):
-    cards = deck.get("cards", [])
-
-    for index, card in enumerate(cards):
-        image_bytes = card.get("generated_image_bytes")
-        card_id = card.get("supabase_card_id")
-
-        if not image_bytes or not card_id:
-            continue
-
-        image_path, image_url = upload_card_image_to_supabase(
-            deck_id=deck_id,
-            card_index=index,
-            image_bytes=image_bytes
-        )
-
-        card["image_storage_path"] = image_path
-        card["image_public_url"] = image_url
-
-        supabase.table("cards").update({
-            "image_storage_path": image_path,
-            "image_public_url": image_url,
-            "image_status": card.get("image_status", "generated")
-        }).eq("id", card_id).execute()
-
-    return deck
 
 def upload_generated_file_to_supabase(bucket_name, file_path, file_bytes, content_type):
     supabase.storage.from_(bucket_name).upload(
@@ -893,12 +1019,14 @@ def create_export_rows(deck, user_email, source_link, reader_level, deck_mode, s
             "priority": card.get("priority"),
             "spoiler_level": card.get("spoiler_level"),
             "sort_order": card.get("sort_order"),
-            "image_source_url": "",
-            "image_creator": "",
-            "image_license": "review_needed",
-            "attribution_required": "",
-            "attribution_text": "",
-            "license_verified": "no",
+            "image_source": card.get("image_source", ""),
+            "image_source_url": card.get("image_source_url", ""),
+            "image_creator": card.get("image_creator", ""),
+            "image_license": card.get("image_license", "review_needed"),
+            "image_license_url": card.get("image_license_url", ""),
+            "attribution_required": "yes" if card.get("attribution_text") else "review",
+            "attribution_text": card.get("attribution_text", ""),
+            "license_verified": card.get("license_verified", "no"),
             "canva_status": "not_started",
             "wix_shop_status": "not_started",
             "product_status": "raw_generation"
@@ -1048,7 +1176,7 @@ def create_pdf(deck):
         pdf.setStrokeColor(colors.lightgrey)
         pdf.rect(image_x, image_y, image_width, image_height)
 
-        image_bytes = card.get("generated_image_bytes")
+        image_bytes = load_card_image_bytes(card)
 
         if image_bytes:
             try:
@@ -1234,12 +1362,18 @@ chapter_context = st.sidebar.text_area(
     height=180
 )
 generate_images = st.sidebar.checkbox(
-    "Generate AI images for cards",
+    "Generate AI images only when no suitable reusable image is found",
     value=True
 )
 
+use_openverse_images = st.sidebar.checkbox(
+    "Automatically use public-domain and CC-licensed Openverse images",
+    value=True,
+    help="Existing Story Schema Card images are checked first. License details are included in the CSV for review."
+)
+
 image_limit = st.sidebar.number_input(
-    "Maximum AI-generated cards (recommended: 4–20)",
+    "Maximum new AI-generated images (recommended: 4–20)",
     min_value=1,
     max_value=120,
     value=4,
@@ -1357,19 +1491,7 @@ if generate_button:
             deck["book"]["deck_mode"] = deck_mode
             deck["book"]["spoiler_mode"] = spoiler_mode
 
-        if generate_images:
-            with st.spinner("Generating card images..."):
-                deck = add_images_to_deck(
-                    deck,
-                    image_limit=image_limit,
-                    chapter_context=chapter_context
-                )
-        else:
-            for card in deck.get("cards", []):
-                card["generated_image_bytes"] = create_placeholder_image(card)
-                card["image_status"] = "placeholder_used_images_not_requested"
-
-        with st.spinner("Preparing downloads..."):
+        with st.spinner("Saving the deck structure..."):
             supabase_deck_id = save_deck_to_supabase(
                 deck=deck,
                 user_email=user_email,
@@ -1380,11 +1502,17 @@ if generate_button:
 
             deck["supabase_deck_id"] = supabase_deck_id
 
-            deck = save_card_images_to_supabase(
+        with st.spinner("Reusing, retrieving, or generating card images..."):
+            deck = add_images_to_deck(
+                deck=deck,
                 deck_id=supabase_deck_id,
-                deck=deck
+                image_limit=image_limit,
+                chapter_context=chapter_context,
+                allow_generation=generate_images,
+                use_openverse=use_openverse_images,
             )
 
+        with st.spinner("Preparing downloads..."):
             export_df = create_export_rows(
                 deck=deck,
                 user_email=user_email,
@@ -1413,6 +1541,13 @@ if generate_button:
         st.session_state["printable_text"] = printable_text
         st.session_state["pdf_bytes"] = pdf_bytes
         st.session_state["supabase_deck_id"] = supabase_deck_id
+        st.session_state["generation_inputs"] = {
+            "user_email": user_email,
+            "source_link": source_link,
+            "reader_level": reader_level,
+            "deck_mode": deck_mode,
+            "spoiler_mode": spoiler_mode,
+        }
 
         st.success("Deck generated. PDF is ready to download.")
 
@@ -1511,10 +1646,103 @@ if "deck" in st.session_state:
             st.write(f"**Chapter/reference:** {card.get('chapter_reference')}")
             st.write(f"**Image search query:** {card.get('image_search_query')}")
             st.write(f"**Generic fallback:** {card.get('generic_image_fallback')}")
-            image_bytes = card.get("generated_image_bytes")
+            if card.get("image_public_url"):
+                st.image(card.get("image_public_url"), width=260)
 
-            if image_bytes:
-                st.image(image_bytes, width=260)
+            st.caption(
+                f"Image source: {card.get('image_source', 'unknown')} · "
+                f"Status: {card.get('image_status', 'unknown')} · "
+                f"License: {card.get('image_license', 'review needed')}"
+            )
+
+            if card.get("attribution_text"):
+                st.caption(f"Attribution: {card.get('attribution_text')}")
+
+            with st.expander("Replace or crop this image"):
+                replacement_file = st.file_uploader(
+                    "Upload a replacement image",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key=f"replacement-file-{card.get('supabase_card_id', i)}",
+                )
+                replacement_url = st.text_input(
+                    "Or enter an image URL",
+                    key=f"replacement-url-{card.get('supabase_card_id', i)}",
+                    help="Only use images you are allowed to reuse. License details should be verified separately.",
+                )
+                focal_x = st.slider(
+                    "Horizontal focal point",
+                    0,
+                    100,
+                    50,
+                    key=f"crop-x-{card.get('supabase_card_id', i)}",
+                )
+                focal_y = st.slider(
+                    "Vertical focal point",
+                    0,
+                    100,
+                    50,
+                    key=f"crop-y-{card.get('supabase_card_id', i)}",
+                )
+
+                if st.button(
+                    "Apply replacement / crop",
+                    key=f"apply-image-{card.get('supabase_card_id', i)}",
+                ):
+                    try:
+                        if replacement_file is not None:
+                            replacement_bytes = replacement_file.getvalue()
+                            source_label = "user_upload"
+                            source_url = ""
+                        elif replacement_url.strip():
+                            replacement_bytes = download_image(replacement_url.strip())
+                            source_label = "user_url"
+                            source_url = replacement_url.strip()
+                        else:
+                            replacement_bytes = load_card_image_bytes(card)
+                            source_label = card.get("image_source", "existing_image")
+                            source_url = card.get("image_source_url", "")
+
+                        if not replacement_bytes:
+                            raise ValueError("No image is available to edit.")
+
+                        cropped_bytes = crop_image(
+                            normalize_image(replacement_bytes),
+                            focal_x=focal_x,
+                            focal_y=focal_y,
+                        )
+                        persist_card_image(
+                            deck_id=deck.get("supabase_deck_id"),
+                            card_index=i - 1,
+                            card=card,
+                            image_bytes=cropped_bytes,
+                            status="user_edited",
+                            metadata={
+                                "image_source": source_label,
+                                "image_source_url": source_url,
+                                "image_license": "user_review_required",
+                                "attribution_text": "",
+                                "license_verified": "no",
+                            },
+                        )
+
+                        generation_inputs = st.session_state["generation_inputs"]
+                        refreshed_export = create_export_rows(deck=deck, **generation_inputs)
+                        refreshed_pdf = create_pdf(deck)
+                        refreshed_csv = refreshed_export.to_csv(index=False).encode("utf-8")
+                        deck_file_urls = save_deck_files_to_supabase(
+                            deck_id=deck.get("supabase_deck_id"),
+                            pdf_bytes=refreshed_pdf,
+                            csv_bytes=refreshed_csv,
+                        )
+                        deck["pdf_public_url"] = deck_file_urls["pdf_public_url"]
+                        deck["csv_public_url"] = deck_file_urls["csv_public_url"]
+                        st.session_state["deck"] = deck
+                        st.session_state["export_df"] = refreshed_export
+                        st.session_state["pdf_bytes"] = refreshed_pdf
+                        st.success("Image updated and deck files rebuilt.")
+                        st.rerun()
+                    except Exception as edit_error:
+                        st.error(f"Image update failed: {edit_error}")
 
             st.link_button(
                 "Search open-license images",
